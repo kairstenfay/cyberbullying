@@ -1,0 +1,659 @@
+---
+title: "The Politics of Cyberbullying on Twitter"
+author: "Kairsten Fay"
+date: "11/28/2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir="/Users/kairstenfay/Documents/dataScience/projects/cyberbullying")
+```
+
+## Overview
+Bullying is a natinal health concern (Xu et al. 2012). Bullying online, known as cyberbullying, frequently pervades social media sites like Twitter, with as many as 15,000 bully-related tweets being sent each day (Huff Post 2012, Phys 2012). In this study, I collected English tweets for six hours in September, 2016. Originally intending to replicate parts of Xu's et al. (2012) study, but given the current events at the time, my results turned political quickly. Here, I focused on differences and similarities in the sentiment, quality, and quantity of words used in tweets sent to different Twitter users. I then compared the language and tone used in tweets sent to the two 2016 U.S. presidential candidates and their two relative, historically biased news companies (CNN and Fox News).  
+
+## Background   
+After witnessing a vast amount of insults and bullying infiltrating Twitter over several months, I read Xu's et al. (2012) [article](http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.374.1862&rep=rep1&type=pdf) from the Association for Computational Linguistics. Their research team used natural langauge processing to detect tweets capturing reports of real-life bullying as well as cyberbullying. I adapted some of their methods for my study. I collected tweets using the [Twitter API](https://dev.twitter.com/overview/api/tweets) with the intention of finding cyberbullying traces. The first half of this project I performed using Python, and my code can be found in [Appendix i](#Ai) and [Appendix ii](#Aii). The rest of the project I completed using R, and the code can be found in this document.  
+  
+## Getting started  
+I selected tweets for this study based on the following criteria: that they were in English, that they contained at least one word from AFINN-111 [(README)](http://www2.imm.dtu.dk/pubdb/views/publication_details.php?id=6010), a list of rated English words (Nielsen 2011), and that they were all original content (no retweets; Xu et al. 2012).  
+
+I collected data from the Twitter API using [Python code](#A0.b) that was made available to me by Bill Howe's [Data Manipulation at Scale](https://www.coursera.org/learn/data-manipulation/home) course on [Coursera](http://www.coursera.com). There was no real reason for collecting tweets using Python rather than R other than that I had previously collected tweets in Python in a previous project and I didn't want to translate to R. I began collecting tweets at 11:10 am PDT on 8 Sep 2016 and finished at approximately 5:20 pm PDT on the same day. During that time frame, I collected 870,852 tweets.  
+
+After collecting the specified tweet set, I calculated each tweet's sentiment using unigrams from the AFINN-file. Then, I removed from each tweet any URLs, words with numbers in them, words with the '@' symbol, and words with letters that repeated 3 or more times. I kept hashtags (compound phrases starting with #) as single tokens (Xu et al. 2012). Then, I imputed the sentiment score of all remaning unigrams not found in the AFINN file. I did this by calculating the average sentiment score of all tweets where an unrated or "unknown" word appeared. Then, I assigned each unknown word its imputed sentiment score and recalculated the sentiment of the entire tweet set using both the AFINN file and the unknown words set. Once again, this code can be found in [Appendix i](#Ai).  
+
+Before reading the data into R, I needed to deparse it using the `JSONIO` library. The code for this step can be found in [Appendix 1](#A1). Then, using R, I created word maps from tweets based on their sentiment score: positive, negative, or neutral. 
+
+## Methods  
+### Setting up environment  
+First, I loaded all of the R-studio packages I needed for the analysis.  
+```{r}
+library(plyr)                   ## reshape dataframe
+library(tm)                     ## removeSparseTerms()
+library(slam) 
+library(RColorBrewer)
+library(wordcloud)              ## visualizations 
+library(ggplot2)                ## visualizations 
+``` 
+  
+Next, I loaded the tweets I collected using Python. I subset the resulting dataframe, `df`, into smaller dataframes based on a tweet's sentiment score, namely: neutral, positive, or negative. I concatenated the resulting dataframes in a list called `frames_list`. To see the structure and summary figures for `df`, please view [Appendix 2](#A2).  
+```{r cache=TRUE}
+df <- read.csv("tweet_frame.csv")
+df$text <- as.character(df$text)
+neu_df <- subset(df, sentiment==0)
+pos_df <- subset(df, sentiment>0)
+neg_df <- subset(df, sentiment<0)
+
+frames_list <- list(df, neu_df, pos_df, neg_df)
+names(frames_list) <- c("df", "neu_df", "pos_df", "neg_df")
+lapply(frames_list, function(x) {
+        length(x[,1]) } )
+```
+  
+There were 27949 total tweets analyzed, with 22883 classified as positive (82%), 4195 as negative (15%), and 871 classified as neutral (3%).  
+
+Then, I created some user-defined functions that I would repeat several times throughout the report. The first one was to remove most punctuation from the dataframe ([source 1](http://stackoverflow.com/questions/27951377/tm-custom-removepunctuation-except-hashtag),
+[source 2](http://stackoverflow.com/questions/21533899/in-r-use-gsub-to-remove-all-punctuation-except-period)). The second one removes any repeating characters in strings with 3 or more of the same character repeated.
+```{r}
+removeMostPunctuation <- 
+        function (x) {
+                x <- gsub("([@])|[[:punct:]]", "\\1", x)
+                return(x)
+        }
+
+replaceRepeatingChar <- 
+        function (x) {
+                #if (grepl('(\\w)\\1{2,}', x) == TRUE) {
+                 x <- gsub('(\\w)\\1{2,}', '\\1', x)
+                #}
+                return(x)
+        }
+```
+  
+Then, I created a user-defined function, `term_doc_df`, that would create convert term document matrices to dataframes (adapted from [source 1](https://www.r-bloggers.com/word-cloud-in-r/),
+[source 2](http://stackoverflow.com/questions/26834576/big-text-corpus-breaks-tm-map)). I removed the stop words 'like', 'just', and 'via' that weren't removed with `removeWords()`, as well as `via`, a common word that appeared when sharing media. I added a `grepl` function call that would remove any links (words containing 'http'), unigrams with repeating @, and Twitter handles @youtube and @c0nvey, because they were frequent in tweets with shared media generated by those providers.  
+```{r}
+term_doc_df <- function(x) {
+        text <- iconv(x$text, 'UTF-8', 'ASCII')
+       # text <- removeMostPunctuation(text)
+       # text <- gsub(" +", " ", text)
+        corpus <- Corpus(DataframeSource(data.frame(text)))
+        corpus <- tm_map(corpus, content_transformer(removeMostPunctuation))
+        corpus <- tm_map(corpus, stripWhitespace)
+        corpus <- tm_map(corpus, removeWords, stopwords("english"))
+        corpus <- tm_map(corpus, removeWords, c('just', 'like', 'via', 'amp'))
+        corpus <- tm_map(corpus, PlainTextDocument)
+
+        tdm <- TermDocumentMatrix(corpus)
+        tdm <- removeSparseTerms(tdm, .9999)
+        m <- as.matrix(tdm)
+        v <- sort(rowSums(m), decreasing=TRUE)
+        d_pre <- data.frame(word=names(v), freq=v)
+        
+        d <- d_pre[!grepl("^http|.*@{2,}.*|@youtube|@c0nvey", d_pre$word), ]
+        ## This function currently returning several empty values w/ frequencies > 0
+}
+```
+  
+I created a custom `avg_sent` function that would calculate and print the average sentiment score of a tweet dataframe.  
+```{r}
+avg_sent <- function(x) {
+        avg <- mean(x$sentiment)
+        stdev <- sd(x$sentiment)
+        paste("The average sentiment score was", avg, 
+              "sentiment points per tweet with a standard deviation of", stdev, 
+              sep=" ")
+}
+```
+  
+Finally, I defined a `make_wordcloud` function that created wordclouds for a term document dataframe ([source 1]((https://www.r-bloggers.com/word-cloud-in-r/)), [source 2](http://stackoverflow.com/questions/15224913/r-add-title-to-wordcloud-graphics-png)).  
+```{r}
+make_wordcloud <- function(x, y, z=NULL, n=2) {
+        for(i in 1:length(x)) {
+                set.seed(0)
+                layout(matrix(c(1,2), nrow=2), heights=c(1,4))
+                par(bg=z) 
+                par(mar=rep(0,4))
+                plot.new()
+                text(x=0.5, y=0.5, names(x[i]))
+                wordcloud(x[[i]]$word, x[[i]]$freq, scale=c(8,.3), min.freq=n,
+                          max.words=80, random.order=TRUE, rot.per=.15, 
+                          colors=y[[i]], vfont=c("sans serif", "plain"), 
+                          main=names(x[[i]]))
+                }
+        }
+```
+  
+### Creating wordclouds  
+After setting up my environment, I ran `term_doc_df()` using `lapply` on the `frames_list`. I stored the resulting dataframes of word occurrences in a new list called `d_frames_list`.   
+```{r eval=FALSE}
+d_frames_list <- lapply(frames_list, term_doc_df)
+```
+```{r echo=FALSE, cache=TRUE}
+d_frames_list <- NULL
+d_frames_list[[1]] <- read.csv("d_frame_df.csv")
+d_frames_list[[2]] <- read.csv("d_frame_neu_df.csv")
+d_frames_list[[3]] <- read.csv("d_frame_pos_df.csv")
+d_frames_list[[4]] <- read.csv("d_frame_neg_df.csv")
+```
+```{r}
+names(d_frames_list) <- names(frames_list)
+for (i in 1:length(d_frames_list)) {
+        d_frames_list[[i]]$word <- as.character(d_frames_list[[i]]$word)
+        my_df <- data.frame(d_frames_list[i])
+        print(head(my_df, 10))
+}
+```
+
+I assigned colors for each dataframe's wordcloud to be constructed.  
+```{r}
+df.pal <- neu_df.pal <- brewer.pal(9, "BuGn"); df.pal <- neu_df.pal <- df.pal[-(1:2)]
+pos_df.pal <- brewer.pal(9, "GnBu"); pos_df.pal <- pos_df.pal[-(1:2)]
+neg_df.pal <- brewer.pal(9, "OrRd"); neg_df.pal <- neg_df.pal[-(1:2)]
+cols_list <- list(df.pal, neu_df.pal, pos_df.pal, neg_df.pal)
+```
+
+Then, I created my wordclouds using a random set of 100 words with a frequency of at least 7 occurrences in each dataframe.  
+```{r warning=FALSE, cache=TRUE}
+make_wordcloud(d_frames_list, cols_list, n=7)
+```
+  
+At this point, I noticed a pattern other than the glaring observation that a lot of Twitter users have foul mouths. That is, U.S. presidential candidates for 2016 Hillary Clinton and Donald Trump made it into the wordclouds. Who was mentioned the most in each dataframe?  
+```{r}
+lapply(d_frames_list, function(x) {
+        mentions <- x[grepl("^@", x$word),]
+        my_df <- data.frame(mentions)
+        head(my_df, 10) } )
+```
+ 
+ @realdonaldtrump was consistently the most popular person to tweet at. Additionally, @hillaryclinton, @cnn, and @foxnews all made it into the top 10 mentions in every dataframe, with the exception of the two news sites missing from the neutral tweets dataframe, `neu_df`.  
+
+Given the [polarization of the most recent U.S. politics](http://www.usnews.com/news/articles/2016-07-19/political-polarization-drives-presidential-race-to-the-bottom), I figured that there might be something distinct happening in tweets aimed at the four previously mentioned figures. In general, I also wanted to see how tweets changed when they were sent to a specific person.  
+
+### Calculating tweet statistics  
+I first calculated the average sentiment of the dataframes in `frames_list`. Then, I created sentiment histograms for each dataframe to check the underlying distribution of data before performing a t-test.  
+```{r}
+lapply(frames_list, avg_sent) 
+```
+  
+```{r}
+hist(df$sentiment, breaks=50)
+par(mfrow=c(1,2))
+hist(pos_df$sentiment, breaks=20)
+hist(neg_df$sentiment, breaks=10)
+```
+  
+Overall, our tweets are approximately Gaussian. Naturally, our positive and negative tweet frames are skewed to the right and to the left, respectively. By the Central Limit Theorem, t-tests for these data should be valid so long as the sample sizes are sufficiently large.  
+
+On average, tweets in English that contained a user mention had a positive sentiment of 7.33 points. Positive tweets of the same type averaged at 9.86 sentiment points, and negative tweets were at -4.91. Using a 95% confidence interval and Student's t-tests, I found that negative, neutral, and positive tweets' sentiment all differed significantly from the mean in `df` ([Appendix 3.a](#A3.a)). 
+
+Next, I looked at the words a Twitterer used. Who used a bigger vocabulary, and who was more verbose? I defined a function to remove any obvious non-words with 3+ repeating characters, an @ symbol, or a number within them.  
+```{r}
+remove_non_words <- function(x) {
+        d.vocab <- x[!grepl('(\\w)\\1{2,}|.*[0-9].*', x$word, 
+                            perl=TRUE),]
+        d.vocab[,1] <- as.character(d.vocab[,1])
+        d.vocab <- subset(d.vocab, nchar(d.vocab[[1]]) > 2)
+        return(d.vocab)
+}
+```
+  
+Then, I defined a function for calculating the average number of times a word was re-used. I used the normalized mean of a word's frequency so as to account for varying lengths in dataframes.  
+```{r}
+avg_word_reuse <- function(x) {
+        my_mean <- mean(x$freq)
+        my_sum <- sum(x$freq)
+        normalized_mean <- mean(x$freq)/sd(x$freq)
+        paste("There was a total of", my_sum, "words with each word used an",
+                "average of", my_mean, "times. The normalized mean was", 
+              normalized_mean, sep=" ")
+}
+```
+  
+Next, I defined a function for calculating the total words used in each tweet in the dataframes (adapted from [source 1](http://stackoverflow.com/questions/31398077/counting-the-total-number-of-words-in-of-rows-of-a-dataframe), 
+[source 2](http://stackoverflow.com/questions/9637278/r-tm-package-invalid-input-in-utf8towcs)). This function would create an extra variable on the dataframe it is iterating over.  
+```{r}
+calc_tweet_length <- function(x) {  
+        new_text <- iconv(x$text, 'UTF-8', 'ASCII')  
+        new_text <- removeWords(new_text, stopwords("english"))
+        new_text <- gsub("\\s+", " ", new_text) 
+        new_text <- removeMostPunctuation(new_text)
+        x$num_words <- sapply(new_text, function(x) length(x[!grepl("http|@|(\\w)\\1{2,}|[0-9]",
+                                        unlist(strsplit(x, "\\W+")))]))
+        return(x)
+}
+```
+  
+I removed non-words from `d_frames_list`. Then, I ran the `avg_word_reuse` function using `lapply` and created a new variable for normalized word frequencies in `d_frames_list`.  
+```{r}
+d_frames_list <- lapply(d_frames_list, remove_non_words)
+
+lapply(d_frames_list, avg_word_reuse)
+d_frames_list <- lapply(d_frames_list, function(x) {
+        x$normalized <- NULL 
+        x$normalized <- (x$freq)/sd(x$freq)
+        return(x)
+        }
+)
+```
+  
+The normalized average number of times a word was re-used in our total tweet set, `df`, was 0.32 times. This mean is our null hypothesis. For the neutral dataframe, it was 0.69 times. Positive tweets reused a word a normalized average of 0.32 times, and negative tweets 0.35 times.  
+  
+However, only the neutral dataframe had a significant difference in the number of times a word was re-used in the neutral dataframe. Therefore, neutral tweets used the most diverse vocabulary on average (p-value<0.05) ([Appendix 3.b](#A3.b)).  
+  
+Next, I addressed which tweets were the lengthiest. I ran the function `calc_tweet_length`, which created a new column in `frames_list` called `num_words`.  
+```{r}
+frames_list <- lapply(frames_list, calc_tweet_length)
+for (i in 1:length(frames_list)) {
+        print(paste("The average number of words per tweet in", 
+                    names(frames_list[i]), "was", mean(frames_list[[i]]$num_words),
+                    "with a standard deviation of", 
+                    sd(frames_list[[i]]$num_words)))
+}
+```
+  
+The null tweet frame, `df`, had an average of 8.46 words per tweet. Neutral and negative tweets were significantly shorter with 7.10 and 8.01 words per tweet, respectively (p-values<0.05, [Appendix 3.c](#A3.c). 
+Positive tweets were significantly longer than the null, with 8.59 average words per tweet (p-value<0.05, [Appendix 3.c](#A3.c))
+  
+## Subsetting by top tweet recipients  
+Next, I subset `frames_list` by those tweets which have a value for column 14, `in_reply_to_screen_name`. Note that this is a distinct feature that requires a tweet to begin with a specific user's name, not simply mention it in the text anywhere. I created `reps_frames_list` by subsetting `frames_list` using `lapply`.  
+```{r}
+reps_frames_list <- lapply(frames_list, function(x) {
+        with_reply_df <- subset(x, !is.na(x[,14]))
+})
+names(reps_frames_list) <- names(frames_list)
+```
+  
+Then, I calculated which were the ten most popular people to receive tweets in each dataframe and stored the results in `top10reps`.    
+```{r}
+top10reps <- lapply(reps_frames_list, function(x) {
+        temp <- data.frame(table(x[,14]))
+        head(arrange(temp, desc(Freq)), 10)
+})
+names(top10reps) <- names(frames_list)
+for (i in 1:length(top10reps)) {
+        print(top10reps[i])
+        top10reps[[i]] <- as.character(top10reps[[i]][,1])
+}
+```
+  
+I then subset the `reps_frames_list`, including only tweets which were sent to twitter users in the `top10reps` list for that particular dataframe. I stored the result in the list, `top_rep_frames_list`.  
+```{r}
+subset_by_top_reps <- function(x,y) {
+        df_list <- NULL 
+        for (i in 1:length(x)) {
+                temp <- subset(x[[i]], x[[i]][,14] %in% y[[i]])
+                df_list[[i]] <- temp
+        } 
+        return(df_list)
+}
+top_rep_frames_list <- subset_by_top_reps(reps_frames_list, top10reps)
+names(top_rep_frames_list) <- names(frames_list)
+lapply(top_rep_frames_list, function(x) {
+        length(x[,1])
+})
+```
+  
+There were 454 tweets in `df` sent to the most popular ten people. For neutral tweets, there were only 16. For positive, 383, and for negative, 92.  
+Then, I created term document dataframes for `top_rep_frames_list`, but this time removing any user handles and the names 'trump' and 'hillary'.  
+```{r eval=FALSE}
+d_top_rep_frames_list <- lapply(top_rep_frames_list, term_doc_df)
+d_top_rep_frames_list <- lapply(d_top_rep_frames_list, function(x) {
+        remove_mentions <- x[!grepl("^@|trump|hillary", x$word),]
+})
+```
+```{r echo=FALSE, cache=TRUE}
+d_top_rep_frames_list <- NULL
+d_top_rep_frames_list[[1]] <- read.csv("d_top_rep_df.csv")
+d_top_rep_frames_list[[2]] <- read.csv("d_top_rep_neu_df.csv")
+d_top_rep_frames_list[[3]] <- read.csv("d_top_rep_pos_df.csv")
+d_top_rep_frames_list[[4]] <- read.csv("d_top_rep_neg_df.csv")
+```
+```{r}
+names(d_top_rep_frames_list) <- names(frames_list)
+lapply(d_top_rep_frames_list, function(x) {
+        head(x, 10)
+})
+```
+  
+I calculated the average sentiment score of tweets in the `top_rep_frames_list`.  
+```{r}
+lapply(top_rep_frames_list, avg_sent)
+```
+  
+Sentiment shifted overall in tweets to the more positive, with `df` producing an average sentiment score of 10.25. Positive tweets moved up to 13.21, and negative tweets decreased in sentiment to -7.11. Neutral, positive, and negative tweets all differed significantly in sentiment from the null, `top_rep_frames_list$df` dataframe ([Appendix 4.a](#A4.a)).  
+Then, I compared the dataframes in our original `frames_list` with the ones in `top_rep_frames_list`. `df` and `pos_df` sentiment increased significantly after subsetting by tweets sent to a top 10 recipient of tweets in their dataframes (p-values<0.05, [Appendix 4.b](#A4.b)). 
+There was no significant difference in `neg_df` sentiment after subsetting similarly (p-value<0.05, [Appendix 4.b](#A4.b)).  
+
+How vocabulary change? I removed non-words from `d_top_rep_frames_list`.  
+```{r}
+d_top_rep_frames_list <- lapply(d_top_rep_frames_list, remove_non_words)
+
+lapply(d_top_rep_frames_list, avg_word_reuse)
+d_top_rep_frames_list <- lapply(d_top_rep_frames_list, function(x) {
+        x$normalized <- NULL 
+        x$normalized <- (x$freq)/sd(x$freq)
+        return(x)
+})
+```
+
+The normalized number of times a word was re-used in our top replies tweet set, `df`, was 0.5 times. For the neutral dataframe, it was 4.6 times. Positive tweets reused a word a normalized average of 0.5 times, and negative tweets 1.8 times.  
+  
+Once again, there was no difference in the average word re-use of tweets between `df` and `pos_df`. However, there was a significant difference in the average word re-use for both neutral and negative tweets. Neutral and negative tweets aimed at the top 10 recipients within their dataframe used a significantly smaller vocabulary than the positive and null tweets aimed at top 10 recipients in each dataframe  (p-value<0.05) (Appendix IV.c).  
+
+I also compared the results for average word re-use to the `frames_list`. There was a significant increase in word re-usage in all data frames (p-value<0.05; Appendix V). Therefore, vocabulary decreased in tweets sent to top ten tweet recipients.  
+
+Which tweets contained more words?  
+```{r}
+top_rep_frames_list <- lapply(top_rep_frames_list, calc_tweet_length)
+for (i in 1:length(top_rep_frames_list)) {
+        print(paste("The average number of words per tweet in", 
+                    names(top_rep_frames_list[i]), "was", 
+                    mean(top_rep_frames_list[[i]]$num_words),
+                    "with a standard deviation of", 
+                    sd(top_rep_frames_list[[i]]$num_words)))
+}
+```
+  
+Overall, our tweets in the top replies `df` had an average of 9.81 words per tweet. Neutral tweets were still shorter at 6.81. This time, positive and negative tweets switched: negative tweets were longer than the null at 10.72 words per tweet, and positive tweets shorter at 9.33 words per tweet on average. I tested the significance of the length of the neutral, positive, and negative tweets compared to the mean, `df`.  
+  
+Neutral and positive tweets aimed at the top 10 replies in each respective dataframe were significantly shorter than top replies in the null frame (p-value<0.05). Negative tweets were significantly longer than the null frame's tweets (p-value<0.05; Appendix IV.d).   
+
+I then compared these results to the previous ones from `frames_list`. How did tweet length change when tweets were only being sent to the most popular people in each dataframe? The summary statistics gave higher averages for tweet length in all dataframes except for neutral tweets, which were reportedly shorter. I tested the significance.  
+```{r}
+t.test(top_rep_frames_list$df$num_words, frames_list$df$num_words, 
+       alternative="greater")
+t.test(top_rep_frames_list$neu_df$num_words, frames_list$neu_df$num_words, 
+       alternative="less")
+t.test(top_rep_frames_list$pos_df$num_words, frames_list$pos_df$num_words, 
+       alternative="greater")
+t.test(top_rep_frames_list$neg_df$num_words, frames_list$neg_df$num_words, 
+       alternative="greater")
+```
+  
+Overall, the average length of tweets in `df`, `pos_df`, and `neg_df` increased after subsetting `frames_list` by the top 10 recipients of tweets in each dataframe (p-value<0.05). There was no signficant difference in neutral tweet length after subsetting by top recipients.  
+
+## Getting political
+Next, I split the dataframes further into a list of dataframes of tweets addressed to the left and to the right. The left included tweets aimed at @hillaryclinton and @cnn, and the right, tweets to @realdonaldtrump and @foxnews.  
+```{r}
+left <- c("hillaryclinton", "cnn")
+left_frames_list <- lapply(reps_frames_list, function(x) {
+        tweets_at_left <- subset(x, x[,14] %in% left) } ) 
+names(left_frames_list) <- c("left_aimed_df", "left_aimed_neu_df", 
+                                 "left_aimed_pos_df", "left_aimed_neg_df")
+lapply(left_frames_list, function(x) {
+        length(x[,1])
+})
+
+right <- c("realdonaldtrump", "foxnews")
+right_frames_list <- lapply(reps_frames_list, function(x) {
+        tweets_at_right <- subset(x, x[,14] %in% right) } )
+names(right_frames_list) <- c("right_aimed_df", "right_aimed_neu_df", 
+                                  "right_aimed_pos_df", "right_aimed_neg_df")
+lapply(right_frames_list, function(x) {
+        length(x[,1])
+})
+```
+  
+The dataframes' lengths dropped a lot after subsetting by politically aimed tweets, but excluding neutral tweets, 'n' was still large enough per the Central Limit Theorem that using t-tests was still valid. I created term document dataframes for each political tweet list, removing mentions of Twitter handles, news sites, and the 2016 U.S. presidential candidates' names.  
+```{r eval=FALSE}
+d_left_frames_list <- lapply(left_frames_list, term_doc_df)
+```
+```{r echo=FALSE, cache=TRUE}
+d_left_frames_list <- NULL
+d_left_frames_list[[1]] <- read.csv("d_left_frame_df.csv")
+d_left_frames_list[[2]] <- read.csv("d_left_frame_neu_df.csv")
+d_left_frames_list[[3]] <- read.csv("d_left_frame_pos_df.csv")
+d_left_frames_list[[4]] <- read.csv("d_left_frame_neg_df.csv")
+```
+```{r}
+names(d_left_frames_list) <- names(left_frames_list)
+d_left_frames_list <- lapply(d_left_frames_list, function(x) {
+        remove_mentions <- x[!grepl("^@|donald|trump|hillary|clinton|fox|cnn", x$word),]
+})
+lapply(d_left_frames_list, function(x) {
+        head(x, 10)
+})
+```
+```{r eval=FALSE}
+d_right_frames_list <- lapply(right_frames_list, term_doc_df)
+```
+```{r echo=FALSE, cache=TRUE}
+d_right_frames_list <- NULL
+d_right_frames_list[[1]] <- read.csv("d_right_frame_df.csv")
+d_right_frames_list[[2]] <- read.csv("d_right_frame_neu_df.csv")
+d_right_frames_list[[3]] <- read.csv("d_right_frame_pos_df.csv")
+d_right_frames_list[[4]] <- read.csv("d_right_frame_neg_df.csv")
+```
+```{r}
+names(d_right_frames_list) <- names(right_frames_list)
+d_right_frames_list <- lapply(d_right_frames_list, function(x) {
+        remove_mentions <- x[!grepl("^@|donald|trump|hillary|clinton|fox|cnn", x$word),]
+})
+lapply(d_right_frames_list, function(x) {
+        head(x, 10)
+})
+```
+  
+Here, I thought that wordclouds might look interesting. So I made some.  
+```{r warning=FALSE}
+make_wordcloud(d_left_frames_list, cols_list, n=1, z="#E4F2FF")
+make_wordcloud(d_right_frames_list, cols_list, n=1, z="#FEDEDE")
+```
+  
+There was a lot of emotion apparent in these wordlcouds. Next, I calculated average sentiment score for these political tweets.  
+```{r}
+lapply(left_frames_list, avg_sent)
+```
+  
+I observed an average sentiment score of 1.02 across all tweets aimed at the left, 8.25 for positive tweets aimed at the left, and -8.52 for negative tweets aimed at the left.  
+
+Then, I tested for signficance. I omitted neutral dataframes due to the lack of sample size.  
+```{r}
+t.test(left_frames_list$left_aimed_pos_df$sentiment, left_frames_list$left_aimed_df$sentiment, 
+       alternative="greater")
+t.test(left_frames_list$left_aimed_neg_df$sentiment, left_frames_list$left_aimed_df$sentiment, 
+       alternative="less")
+```
+  
+Positive tweets sent to @hillaryclinton and @cnn had significantly higher sentiment than the null (p-value<0.05). Likewise, negative tweets sent to the left had a significantly lower sentiment than the null (p-value<0.05).  
+
+How did the right change?  
+```{r}
+lapply(right_frames_list, avg_sent)
+```
+  
+On the right, I observed an average sentiment score of 3.51 points across all tweets, 8.49 for positive tweets, and -5.6 for negative tweets.  
+```{r}
+t.test(right_frames_list$right_aimed_pos_df$sentiment, right_frames_list$right_aimed_df$sentiment, 
+       alternative="greater")
+t.test(right_frames_list$right_aimed_neg_df$sentiment, right_frames_list$right_aimed_df$sentiment, 
+       alternative="less")
+```
+  
+Positive tweets sent to @realdonaldtrump and @foxnews were significantly higher in sentiment than the null, and negative tweets were significantly lower than the null (p-values<0.05).  
+
+Next, I explored how political sentiment differed from the original dataframes, as well as the `top10replies` dataframes. 
+```{r}
+t.test(left_frames_list$left_aimed_df$sentiment, reps_frames_list$df$sentiment, 
+       alternative="greater")
+```
+
+
+########### end ######################################################
+
+######################################################################
+
+######################################################################
+
+######################################################################
+
+######################################################################
+
+######################################################################
+
+######################################################################
+
+######################################################################
+
+######################################################################
+
+######################################################################
+
+
+
+
+## Appendix  
+
+### <a id="Ai">Appendix i</a>. 
+Python code for filtering tweets from Twitter API. <https://github.com/kairstenfay/cyberbullying/blob/master/filter_rate_tweets.py>.  
+  
+### <a id="Aii">Appendix ii</a> 
+Supplement Python code used to collect tweets from Twitter API. <https://github.com/kairstenfay/cyberbullying/blob/master/twitterstream.py>  
+  
+### <a id="A1">Appendix 1</a> 
+Load tweets from JSON formatted text file and save them into a new file, 'tweet_frame.csv'.  
+```{r eval=FALSE}
+## This step was done in advance of the document creation 
+require(RJSONIO)
+require(plyr)
+tweets_json <- fromJSON("one_line_tweets.txt", nullValue=NA)
+dat <- lapply(tweets_json, function(j) {
+        as.data.frame(replace(j, sapply(j, is.list), NA))
+})
+df <- rbind.fill(dat)
+df$text <- as.character(df$text)
+str(df)
+Sys.setlocale('LC_ALL','C') 
+write.csv(df, "tweet_frame.csv", row.names = FALSE, na = "NA")
+```
+  
+The raw file can be seen at <https://github.com/kairstenfay/cyberbullying/blob/master/one_line_tweets.txt>.  
+  
+### <a id="A2">Appendix 2</a>  
+Structure and summary of `df`.  
+```{r}
+str(df)
+summary(df)
+```
+  
+### <a id="A3.a">Appendix 3.a</a>
+```{r}
+## Did neutral, positive, or negative tweet sentiment differ significantly from the
+## null `df`?  
+t.test(neu_df$sentiment, df$sentiment, alternative="less")
+t.test(pos_df$sentiment, df$sentiment, alternative="greater")
+t.test(neg_df$sentiment, df$sentiment, alternative="less")
+```
+  
+### <a id="A3.b">Appendix 3.b</a>    
+```{r}
+## Did neutral, positive, or negative tweet word re-use differ significantly from the
+## null `df`?  
+t.test(d_frames_list$pos_df$normalized, d_frames_list$df$normalized)
+t.test(d_frames_list$neu_df$normalized, d_frames_list$df$normalized, 
+       alternative="greater")
+t.test(d_frames_list$neg_df$normalized, d_frames_list$df$normalized, 
+       alternative="greater")
+```
+  
+### <a id="A3.c">Appendix III.c</a>  
+```{r}
+## Did neutral, positive, or negative tweet length differ significantly from the
+## null, `df`?  
+t.test(frames_list$neu_df$num_words, frames_list$df$num_words, 
+       alternative="less")
+t.test(frames_list$pos_df$num_words, frames_list$df$num_words, 
+       alternative="greater")
+t.test(frames_list$neg_df$num_words, frames_list$df$num_words, 
+       alternative="less")
+```
+  
+### <a id="A4.a">Appendix 4.a</a>  
+```{r}
+## After subsetting tweets by those in reply to a top 10 recipient of tweets for 
+## each dataframe, did neutral, positive, or negative tweet sentiment differ
+## significantly from the null, `df`?
+t.test(top_rep_frames_list$neu_df$sentiment, top_rep_frames_list$df$sentiment, 
+       alternative="less")
+t.test(top_rep_frames_list$pos_df$sentiment, top_rep_frames_list$df$sentiment, 
+       alternative="greater")
+t.test(top_rep_frames_list$neg_df$sentiment, top_rep_frames_list$df$sentiment, 
+       alternative="less")
+```
+  
+### <a id="A4.b">Appendix 4.b </a>
+```{r}
+## After subsetting tweets by those in reply to a top 10 recipient of tweets for 
+## each dataframe, did any dataframe see a significant change in sentiment from its 
+## parallel dataframe in `frames_list`?  
+t.test(top_rep_frames_list$df$sentiment, frames_list$df$sentiment, 
+       alternative="greater")
+t.test(top_rep_frames_list$pos_df$sentiment, frames_list$pos_df$sentiment, 
+       alternative="greater")
+t.test(top_rep_frames_list$neg_df$sentiment, frames_list$neg_df$sentiment, 
+       alternative="less")
+```
+  
+### <a id="A4.c">Appendix 4.c </a>
+```{r}
+t.test(d_top_rep_frames_list$pos_df$normalized, 
+       d_top_rep_frames_list$df$normalized)
+
+t.test(d_top_rep_frames_list$neu_df$normalized, 
+       d_top_rep_frames_list$df$normalized, alternative="greater")
+
+t.test(d_top_rep_frames_list$neg_df$normalized, 
+       d_top_rep_frames_list$df$normalized, alternative="greater")
+```
+  
+### Appendix IV.d  
+```{r}
+t.test(top_rep_frames_list$neu_df$num_words, top_rep_frames_list$df$num_words, 
+       alternative="less")
+t.test(top_rep_frames_list$pos_df$num_words, top_rep_frames_list$df$num_words, 
+       alternative="less")
+t.test(top_rep_frames_list$neg_df$num_words, top_rep_frames_list$df$num_words, 
+       alternative="greater")
+```
+  
+### Appendix V  
+```{r}
+t.test(d_top_rep_frames_list$df$normalized, d_frames_list$df$normalized, 
+       alternative="greater")
+t.test(d_top_rep_frames_list$neu_df$normalized, d_frames_list$neu_df$normalized, 
+       alternative="greater")
+t.test(d_top_rep_frames_list$pos_df$normalized, d_frames_list$pos_df$normalized, 
+       alternative="greater")
+t.test(d_top_rep_frames_list$neg_df$normalized, d_frames_list$neg_df$normalized, 
+       alternative="greater")
+```
+  
+  
+## Works cited  
+  
+agstudy. 2014. In r use gsub to remove all punctuation except period. Stack Overflow. Retrieved from <http://stackoverflow.com/questions/21533899/in-r-use-gsub-to-remove-all-punctuation-except-period> on 8 Dec 2016.  
+  
+Andrie. 2013. R: add title to wordcloud graphics / png. Stack Overflow. Retrieved from <http://stackoverflow.com/questions/15224913/r-add-title-to-wordcloud-graphics-png> on 6 Dec 2016.  
+  
+chappers. 2015. Counting the total number of words in of [sic] rows of a dataframe. Stack Overflow. Retrieved from <http://stackoverflow.com/questions/31398077/counting-the-total-number-of-words-in-of-rows-of-a-dataframe> on 8 Dec 2016.  
+  
+Huffington Post. 2012. Bullying on Twitter: Researchers Find 15,000 Bully-Related Tweets Sent Daily (STUDY). Retrieved from <http://www.huffingtonpost.com/2012/08/02/bullying-on-twitter_n_1732952.html> on 6 December 2016.  
+  
+MHN. 2014. Big text corpus breaks tm_map. Stack Overflow. Retrieved from <http://stackoverflow.com/questions/26834576/big-text-corpus-breaks-tm-map> on 9 Dec 2016.  
+  
+MrFlick. 2015. tm custom removePunctuation except hashtag. Stack Overflow. Retrieved from <http://stackoverflow.com/questions/27951377/tm-custom-removepunctuation-except-hashtag> on 26 November 2016.  
+  
+Nielsen, FA. 2011. A new ANEW: Evaluation of a word list for sentiment analysis in microblogs. [arXiv:1103.29903v1 (cs.IR)](https://arxiv.org/abs/1103.2903).  
+  
+Soergel, A. 2016. Divided We Stand. US News. Retrieved from <http://www.usnews.com/news/articles/2016-07-19/political-polarization-drives-presidential-race-to-the-bottom> on 6 Dec 2016.  
+  
+Sonego P. 2011. Word Cloud in R. R-bloggers. Retrieved from <https://www.r-bloggers.com/word-cloud-in-r/> on 20 Nov 2016.  
+  
+Phys Org. 2012. Learning machines scour Twitter in service of bullying research. Retrieved from <http://phys.org/news/2012-08-machines-scour-twitter-bullying.html> on 6 Dec 2016.  
+  
+Xu et al. 2012. Learning from bullying traces in social media. Assoc. for Comp. Linguistics: Human Lang. Tech: 656-666.   <http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.374.1862&rep=rep1&type=pdf>.  
+  
+Yadav S. 2015. R tm package invalid input in 'utf8towcs'. Stack Overflow. Retrieved from <http://stackoverflow.com/questions/9637278/r-tm-package-invalid-input-in-utf8towcs> on 8 Dec 2016.  
+  
